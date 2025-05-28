@@ -1,0 +1,47 @@
+# 环境变量文件
+.env
+.env.local
+.env.production
+
+# 日志文件
+*.log
+logs/
+
+# Deno缓存和锁文件
+.deno/
+deno.lock
+
+# Docker相关
+.dockerignore
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+
+# 备份文件
+*.bak
+*.backup
+
+# Node.js (如果有工具链)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# SSL证书
+*.pem
+*.key
+*.crt

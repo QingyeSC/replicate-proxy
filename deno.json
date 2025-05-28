@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "lib": ["deno.window"],
+    "strict": true
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  },
+  "fmt": {
+    "files": {
+      "include": ["src/"]
+    },
+    "options": {
+      "useTabs": false,
+      "lineWidth": 100,
+      "indentWidth": 2,
+      "semiColons": true,
+      "singleQuote": false,
+      "proseWrap": "preserve"
+    }
+  },
+  "tasks": {
+    "start": "deno run --allow-net --allow-env src/main.ts",
+    "dev": "deno run --watch --allow-net --allow-env src/main.ts",
+    "cache": "deno cache src/main.ts",
+    "test": "deno test --allow-net --allow-env"
+  },
+  "imports": {
+    "replicate": "npm:replicate@0.22.0"
+  }
+}
