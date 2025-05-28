@@ -1,5 +1,5 @@
-import { createSSEChunk, createErrorResponse, createAuthErrorResponse, logDebug, logError } from "./utils.ts";
-import { API_PATHS, CORS_HEADERS, ERROR_CODES, MODELS, PROXY_MODEL_NAME, MODEL_MAPPING } from "./config.ts";
+import { createSSEChunk, createErrorResponse, createAuthErrorResponse, createTimeoutErrorResponse, withTimeout, logDebug, logError } from "./utils.ts";
+import { API_PATHS, CORS_HEADERS, ERROR_CODES, MODELS, PROXY_MODEL_NAME, MODEL_MAPPING, TIMEOUT_CONFIG } from "./config.ts";
 import { processMessages, buildModelInput } from "./message-processor.ts";
 import { createApiService, ReplicateError } from "./api-service.ts";
 import { RequestBody, ChatCompletion, ModelInput } from "./types.ts";
@@ -185,11 +185,57 @@ function createReplicateErrorResponse(error: ReplicateError): Response {
 }
 
 /**
- * 处理聊天完成请求
+ * 安全的请求体日志记录 - 只记录非敏感信息
+ * @param requestBody - 请求体
+ */
+function logRequestBodySafely(requestBody: RequestBody): void {
+    const safeLogData = {
+        model: requestBody.model || "未指定",
+        stream: requestBody.stream || false,
+        max_tokens: requestBody.max_tokens || "未指定",
+        messages_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
+        message_roles: Array.isArray(requestBody.messages) ? requestBody.messages.map(msg => msg.role) : []
+    };
+    logDebug("请求参数（安全日志）", safeLogData);
+}
+
+/**
+ * 处理聊天完成请求（带超时控制）
  * @param req - Request对象
  * @returns Response对象的Promise
  */
 export async function handleChatCompletionRequest(req: Request): Promise<Response> {
+    try {
+        // 使用超时控制包装整个请求处理过程
+        return await withTimeout(
+            handleChatCompletionRequestInternal(req),
+            TIMEOUT_CONFIG.REQUEST_TIMEOUT,
+            "请求处理超时（600秒），请稍后重试"
+        );
+    } catch (error) {
+        // 如果是超时错误，返回特定的超时响应
+        if (error instanceof Error && error.message.includes("超时")) {
+            logError("请求处理超时:", error);
+            return createTimeoutErrorResponse(error.message);
+        }
+        
+        // 其他错误按原来的方式处理
+        logError("请求处理出错:", error);
+        return createErrorResponse(
+            "Internal Server Error",
+            500,
+            "internal_error",
+            ERROR_CODES.INTERNAL_ERROR
+        );
+    }
+}
+
+/**
+ * 内部的聊天完成请求处理函数
+ * @param req - Request对象
+ * @returns Response对象的Promise
+ */
+async function handleChatCompletionRequestInternal(req: Request): Promise<Response> {
     // 验证并提取API密钥
     const authValidation = validateAndExtractApiKey(req.headers.get("Authorization"));
     if (!authValidation.isValid) {
@@ -203,7 +249,8 @@ export async function handleChatCompletionRequest(req: Request): Promise<Respons
         let requestBody: RequestBody;
         try {
             requestBody = await req.json() as RequestBody;
-            logDebug("请求体", requestBody);
+            // 使用安全的日志记录方式，不记录敏感信息
+            logRequestBodySafely(requestBody);
         } catch (e) {
             logError("解析请求JSON失败:", e);
             return createErrorResponse(
@@ -272,7 +319,7 @@ export async function handleChatCompletionRequest(req: Request): Promise<Respons
 }
 
 /**
- * 处理流式响应
+ * 处理流式响应（带超时控制）
  * @param chatCompletionId - 聊天完成ID
  * @param requestModelName - 请求的模型名称
  * @param input - 模型输入
@@ -285,16 +332,23 @@ function handleStreamResponse(
     input: ModelInput,
     apiService: any
 ): Response {
-    logDebug("处理流式响应...");
+    logDebug("处理流式响应（带600秒超时控制）...");
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
         async start(controller) {
             try {
-                // 处理流式输出
+                // 处理流式输出，整个过程都在超时控制之下
                 let isFirstEvent = true; // 标记是否是第一个事件
 
-                for await (const event of apiService.streamModelResponse(input)) {
+                // 使用超时控制包装流式API调用
+                const streamWithTimeout = withTimeout(
+                    apiService.streamModelResponse(input),
+                    TIMEOUT_CONFIG.REQUEST_TIMEOUT,
+                    "流式API调用超时"
+                );
+
+                for await (const event of await streamWithTimeout) {
                     // 在收到第一个事件时发送角色信息
                     if (isFirstEvent) {
                         // 块 1: 发送角色信息
@@ -327,6 +381,7 @@ function handleStreamResponse(
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 
                         logDebug("流式响应完成");
+                        break;
                     }
                 }
 
@@ -336,17 +391,26 @@ function handleStreamResponse(
                 logError("流式处理期间出错:", error);
                 
                 // 发送错误信息到流中
-                if (error && typeof error === 'object' && ('status' in error || 'response' in error)) {
+                let errorMessage = "Stream processing failed";
+                let errorCode = "stream_error";
+                
+                // 检查是否是超时错误
+                if (error instanceof Error && error.message.includes("超时")) {
+                    errorMessage = "流式响应超时，请稍后重试";
+                    errorCode = "stream_timeout";
+                } else if (error && typeof error === 'object' && ('status' in error || 'response' in error)) {
                     const replicateError = error as ReplicateError;
-                    const errorResponse = {
-                        error: {
-                            message: replicateError.message || "Stream processing failed",
-                            type: "api_error",
-                            code: "stream_error"
-                        }
-                    };
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorResponse)}\n\n`));
+                    errorMessage = replicateError.message || "Stream processing failed";
                 }
+                
+                const errorResponse = {
+                    error: {
+                        message: errorMessage,
+                        type: "api_error",
+                        code: errorCode
+                    }
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorResponse)}\n\n`));
                 
                 controller.error(error);
             }
@@ -365,7 +429,7 @@ function handleStreamResponse(
 }
 
 /**
- * 处理非流式响应
+ * 处理非流式响应（带超时控制）
  * @param chatCompletionId - 聊天完成ID
  * @param requestModelName - 请求的模型名称
  * @param input - 模型输入
@@ -378,11 +442,15 @@ async function handleNonStreamResponse(
     input: ModelInput,
     apiService: any
 ): Promise<Response> {
-    logDebug("处理非流式响应");
+    logDebug("处理非流式响应（带600秒超时控制）");
 
     try {
-        // 调用非流式 API 并等待结果
-        const assistantContent = await apiService.getModelResponse(input);
+        // 使用超时控制包装API调用
+        const assistantContent = await withTimeout(
+            apiService.getModelResponse(input),
+            TIMEOUT_CONFIG.REQUEST_TIMEOUT,
+            "API调用超时，请稍后重试"
+        );
 
         // 构建最终响应（token使用量全部设置为0）
         const finalResponse: ChatCompletion = {
@@ -408,7 +476,7 @@ async function handleNonStreamResponse(
             },
         };
 
-        logDebug("非流式响应:", finalResponse);
+        logDebug("非流式响应处理完成");
 
         return new Response(JSON.stringify(finalResponse), {
             status: 200,
@@ -418,6 +486,12 @@ async function handleNonStreamResponse(
             },
         });
     } catch (error) {
+        // 检查是否是超时错误
+        if (error instanceof Error && error.message.includes("超时")) {
+            logError("API调用超时:", error);
+            return createTimeoutErrorResponse(error.message);
+        }
+        
         // 检查是否是Replicate API错误
         if (error && typeof error === 'object' && ('status' in error || 'response' in error)) {
             return createReplicateErrorResponse(error as ReplicateError);

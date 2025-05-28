@@ -1,6 +1,30 @@
 import { SSEChunk } from "./types.ts";
 
 /**
+ * 为 Promise 添加超时控制
+ * 这个函数可以让任何异步操作在指定时间后自动取消
+ * @param promise - 要包装的 Promise（比如 API 调用）
+ * @param timeoutMs - 超时时间（毫秒）
+ * @param errorMessage - 超时时显示的错误消息
+ * @returns 带超时控制的 Promise
+ */
+export function withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    errorMessage: string = "操作超时"
+): Promise<T> {
+    return Promise.race([
+        promise, // 原始的异步操作
+        new Promise<never>((_, reject) => {
+            // 创建一个在指定时间后拒绝的 Promise
+            setTimeout(() => {
+                reject(new Error(errorMessage));
+            }, timeoutMs);
+        })
+    ]);
+}
+
+/**
  * 创建 SSE 数据块
  * @param id - 事件ID
  * @param model - 模型名称
@@ -114,6 +138,31 @@ export function createAuthErrorResponse(message: string, code: string): Response
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
         "WWW-Authenticate": 'Bearer realm="API Access"'
+      }
+    }
+  );
+}
+
+/**
+ * 创建超时错误响应
+ * @param message - 错误消息
+ * @returns Response对象
+ */
+export function createTimeoutErrorResponse(message: string = "请求处理超时，请稍后重试"): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        message,
+        type: "timeout_error",
+        param: null,
+        code: "request_timeout"
+      }
+    }),
+    {
+      status: 408, // Request Timeout
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
       }
     }
   );

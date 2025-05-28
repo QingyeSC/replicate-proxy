@@ -34,6 +34,15 @@ export const MAX_TOKENS_CONFIG = {
 };
 
 /**
+ * 超时配置（毫秒）
+ * 设置为600秒（10分钟）超时
+ */
+export const TIMEOUT_CONFIG = {
+    // 全局请求超时：600秒
+    REQUEST_TIMEOUT: 600000
+};
+
+/**
  * 初始化 Replicate 客户端
  * @param apiKey 用户提供的API密钥
  */
@@ -70,7 +79,8 @@ export const ERROR_CODES = {
     INVALID_JSON: "invalid_json",
     INVALID_MESSAGES: "invalid_messages",
     API_ERROR: "api_error",
-    INTERNAL_ERROR: "internal_error"
+    INTERNAL_ERROR: "internal_error",
+    TIMEOUT_ERROR: "request_timeout"
 };
 
 /**

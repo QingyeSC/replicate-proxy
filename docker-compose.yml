@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "deno", "eval", "fetch('http://localhost:8000/v1/models').then(r => r.ok ? Deno.exit(0) : Deno.exit(1))"]
-      interval: 30s
+      interval: 300s
       timeout: 10s
       retries: 3
       start_period: 10s
