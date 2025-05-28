@@ -16,13 +16,17 @@ services:
       start_period: 10s
     networks:
       - claude-network
-    # 资源限制
     deploy:
       resources:
         limits:
           memory: 512M
         reservations:
           memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   claude-network:

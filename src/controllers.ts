@@ -1,4 +1,20 @@
-import { createSSEChunk, createErrorResponse, createAuthErrorResponse, createTimeoutErrorResponse, withTimeout, logDebug, logError } from "./utils.ts";
+import { 
+    createSSEChunk, 
+    createErrorResponse, 
+    createAuthErrorResponse, 
+    createTimeoutErrorResponse, 
+    withTimeout, 
+    logError,
+    // 使用新的安全日志函数
+    generateRequestId,
+    logRequestStart,
+    logRequestMetadata,
+    logApiCallStart,
+    logApiCallComplete,
+    logResponseComplete,
+    logStreamProgress,
+    logSystem
+} from "./utils.ts";
 import { API_PATHS, CORS_HEADERS, ERROR_CODES, MODELS, PROXY_MODEL_NAME, MODEL_MAPPING, TIMEOUT_CONFIG } from "./config.ts";
 import { processMessages, buildModelInput } from "./message-processor.ts";
 import { createApiService, ReplicateError } from "./api-service.ts";
@@ -51,16 +67,17 @@ export function handleNotFoundRequest(): Response {
 /**
  * 验证并提取Replicate API密钥
  * @param authHeader - Authorization头部值
+ * @param requestId - 请求ID
  * @returns 验证结果: { isValid: boolean, apiKey?: string, response?: Response }
  */
-export function validateAndExtractApiKey(authHeader: string | null): {
+export function validateAndExtractApiKey(authHeader: string | null, requestId: string): {
     isValid: boolean;
     apiKey?: string;
     response?: Response;
 } {
     // 检查Authorization头部是否存在且格式正确
     if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) {
-        logDebug("认证失败: 缺少或格式错误的 Authorization header");
+        logSystem(`${requestId} 认证失败: 缺少或格式错误的 Authorization header`);
         return {
             isValid: false,
             response: createAuthErrorResponse(
@@ -75,7 +92,7 @@ export function validateAndExtractApiKey(authHeader: string | null): {
     
     // 基本验证API密钥格式（Replicate API密钥通常以r8_开头）
     if (!apiKey || apiKey.length < 10) {
-        logDebug("认证失败: 无效的 Replicate API Key");
+        logSystem(`${requestId} 认证失败: 无效的 Replicate API Key格式`);
         return {
             isValid: false,
             response: createAuthErrorResponse(
@@ -85,16 +102,17 @@ export function validateAndExtractApiKey(authHeader: string | null): {
         };
     }
 
-    logDebug("API密钥验证成功");
+    logSystem(`${requestId} API密钥验证成功`);
     return { isValid: true, apiKey };
 }
 
 /**
  * 验证请求的模型是否支持
  * @param requestModel - 请求的模型名称
+ * @param requestId - 请求ID
  * @returns 验证结果
  */
-function validateRequestModel(requestModel?: string): {
+function validateRequestModel(requestModel?: string, requestId?: string): {
     isValid: boolean;
     modelName: string;
     response?: Response;
@@ -103,7 +121,9 @@ function validateRequestModel(requestModel?: string): {
     
     // 检查模型是否在映射列表中
     if (!MODEL_MAPPING[modelName]) {
-        logDebug(`不支持的模型: ${modelName}`);
+        if (requestId) {
+            logSystem(`${requestId} 不支持的模型: ${modelName}`);
+        }
         return {
             isValid: false,
             modelName,
@@ -122,9 +142,10 @@ function validateRequestModel(requestModel?: string): {
 /**
  * 创建OpenAI格式的错误响应（基于Replicate错误）
  * @param error - Replicate错误对象
+ * @param requestId - 请求ID
  * @returns OpenAI格式的错误响应
  */
-function createReplicateErrorResponse(error: ReplicateError): Response {
+function createReplicateErrorResponse(error: ReplicateError, requestId?: string): Response {
     const status = error.status || error.response?.status || 500;
     let errorType = "api_error";
     let errorCode = "replicate_error";
@@ -165,6 +186,11 @@ function createReplicateErrorResponse(error: ReplicateError): Response {
         }
     }
     
+    // 记录错误（不包含用户内容）
+    if (requestId) {
+        logError("Replicate API错误", error, requestId);
+    }
+    
     return new Response(
         JSON.stringify({
             error: {
@@ -185,59 +211,61 @@ function createReplicateErrorResponse(error: ReplicateError): Response {
 }
 
 /**
- * 安全的请求体日志记录 - 只记录非敏感信息
- * @param requestBody - 请求体
- */
-function logRequestBodySafely(requestBody: RequestBody): void {
-    const safeLogData = {
-        model: requestBody.model || "未指定",
-        stream: requestBody.stream || false,
-        max_tokens: requestBody.max_tokens || "未指定",
-        messages_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
-        message_roles: Array.isArray(requestBody.messages) ? requestBody.messages.map(msg => msg.role) : []
-    };
-    logDebug("请求参数（安全日志）", safeLogData);
-}
-
-/**
  * 处理聊天完成请求（带超时控制）
  * @param req - Request对象
  * @returns Response对象的Promise
  */
 export async function handleChatCompletionRequest(req: Request): Promise<Response> {
+    const requestId = generateRequestId();
+    const startTime = Date.now();
+    
+    // 记录请求开始
+    logRequestStart(req, requestId);
+    
     try {
         // 使用超时控制包装整个请求处理过程
-        return await withTimeout(
-            handleChatCompletionRequestInternal(req),
+        const response = await withTimeout(
+            handleChatCompletionRequestInternal(req, requestId, startTime),
             TIMEOUT_CONFIG.REQUEST_TIMEOUT,
             "请求处理超时（600秒），请稍后重试"
         );
+        
+        // 记录响应完成
+        logResponseComplete(requestId, startTime, response.status);
+        return response;
+        
     } catch (error) {
         // 如果是超时错误，返回特定的超时响应
         if (error instanceof Error && error.message.includes("超时")) {
-            logError("请求处理超时:", error);
-            return createTimeoutErrorResponse(error.message);
+            logError("请求处理超时", error, requestId);
+            const timeoutResponse = createTimeoutErrorResponse(error.message);
+            logResponseComplete(requestId, startTime, timeoutResponse.status, "请求超时");
+            return timeoutResponse;
         }
         
         // 其他错误按原来的方式处理
-        logError("请求处理出错:", error);
-        return createErrorResponse(
+        logError("请求处理出错", error, requestId);
+        const errorResponse = createErrorResponse(
             "Internal Server Error",
             500,
             "internal_error",
             ERROR_CODES.INTERNAL_ERROR
         );
+        logResponseComplete(requestId, startTime, errorResponse.status, "内部错误");
+        return errorResponse;
     }
 }
 
 /**
  * 内部的聊天完成请求处理函数
  * @param req - Request对象
+ * @param requestId - 请求ID
+ * @param startTime - 请求开始时间
  * @returns Response对象的Promise
  */
-async function handleChatCompletionRequestInternal(req: Request): Promise<Response> {
+async function handleChatCompletionRequestInternal(req: Request, requestId: string, startTime: number): Promise<Response> {
     // 验证并提取API密钥
-    const authValidation = validateAndExtractApiKey(req.headers.get("Authorization"));
+    const authValidation = validateAndExtractApiKey(req.headers.get("Authorization"), requestId);
     if (!authValidation.isValid) {
         return authValidation.response!;
     }
@@ -250,9 +278,9 @@ async function handleChatCompletionRequestInternal(req: Request): Promise<Respon
         try {
             requestBody = await req.json() as RequestBody;
             // 使用安全的日志记录方式，不记录敏感信息
-            logRequestBodySafely(requestBody);
+            logRequestMetadata(requestId, requestBody);
         } catch (e) {
-            logError("解析请求JSON失败:", e);
+            logError("解析请求JSON失败", e, requestId);
             return createErrorResponse(
                 "Invalid JSON in request body",
                 400,
@@ -262,7 +290,7 @@ async function handleChatCompletionRequestInternal(req: Request): Promise<Respon
         }
 
         // 验证请求的模型
-        const modelValidation = validateRequestModel(requestBody.model);
+        const modelValidation = validateRequestModel(requestBody.model, requestId);
         if (!modelValidation.isValid) {
             return modelValidation.response!;
         }
@@ -273,11 +301,11 @@ async function handleChatCompletionRequestInternal(req: Request): Promise<Respon
         const isStream = requestBody.stream === true;
 
         // 处理消息并提取必要信息
-        const { userContent, systemPrompt, imageUrls } = processMessages(requestBody);
+        const { userContent, systemPrompt, imageUrls } = processMessages(requestBody, requestId);
 
         // 检查userContent是否成功生成
         if (!userContent) {
-            logDebug("请求体必须包含非空的'messages'数组");
+            logSystem(`${requestId} 请求体必须包含非空的'messages'数组`);
             return createErrorResponse(
                 "Request body must contain a non-empty 'messages' array.",
                 400,
@@ -287,28 +315,31 @@ async function handleChatCompletionRequestInternal(req: Request): Promise<Respon
         }
 
         // 构建模型输入（包含max_tokens验证）
-        const input: ModelInput = buildModelInput(userContent, systemPrompt, imageUrls, requestBody.max_tokens);
+        const input: ModelInput = buildModelInput(userContent, systemPrompt, imageUrls, requestBody.max_tokens, requestId);
 
         // 为本次交互生成唯一ID
         const chatCompletionId = `chatcmpl-${crypto.randomUUID()}`;
 
         // 创建API服务实例
-        const apiService = createApiService(userApiKey, requestModelName);
+        const apiService = createApiService(userApiKey, requestModelName, requestId);
+
+        // 记录API调用开始
+        logApiCallStart(requestId, requestModelName, isStream);
 
         // 根据是否流式决定调用方式
         if (isStream) {
-            return handleStreamResponse(chatCompletionId, requestModelName, input, apiService);
+            return handleStreamResponse(chatCompletionId, requestModelName, input, apiService, requestId);
         } else {
-            return handleNonStreamResponse(chatCompletionId, requestModelName, input, apiService);
+            return handleNonStreamResponse(chatCompletionId, requestModelName, input, apiService, requestId);
         }
     } catch (error) {
         // 检查是否是Replicate API错误
         if (error && typeof error === 'object' && ('status' in error || 'response' in error)) {
-            return createReplicateErrorResponse(error as ReplicateError);
+            return createReplicateErrorResponse(error as ReplicateError, requestId);
         }
         
         // 全局错误处理
-        logError("处理程序中的未处理错误:", error);
+        logError("处理程序中的未处理错误", error, requestId);
         return createErrorResponse(
             "Internal Server Error",
             500,
@@ -324,17 +355,22 @@ async function handleChatCompletionRequestInternal(req: Request): Promise<Respon
  * @param requestModelName - 请求的模型名称
  * @param input - 模型输入
  * @param apiService - API服务实例
+ * @param requestId - 请求ID
  * @returns 流式响应
  */
 function handleStreamResponse(
     chatCompletionId: string,
     requestModelName: string,
     input: ModelInput,
-    apiService: any
+    apiService: any,
+    requestId: string
 ): Response {
-    logDebug("处理流式响应（带600秒超时控制）...");
+    logSystem(`${requestId} 处理流式响应（带600秒超时控制）...`);
 
     const encoder = new TextEncoder();
+    let chunksCount = 0;
+    const apiStartTime = Date.now();
+    
     const stream = new ReadableStream({
         async start(controller) {
             try {
@@ -364,6 +400,11 @@ function handleStreamResponse(
                         controller.enqueue(encoder.encode(
                             createSSEChunk(chatCompletionId, requestModelName, event.data, null, null)
                         ));
+                        chunksCount++;
+                        
+                        // 记录流式进度（不记录内容）
+                        logStreamProgress(requestId, chunksCount);
+                        
                         await new Promise(resolve => setTimeout(resolve, 1)); // 微小延迟以提高并发性能
                     } else if (event.event === "done") {
                         // 发送结束信号（token使用量全部设置为0）
@@ -380,7 +421,10 @@ function handleStreamResponse(
                         // 发送 [DONE] 标记
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 
-                        logDebug("流式响应完成");
+                        // 记录API调用完成
+                        const apiDuration = Date.now() - apiStartTime;
+                        logApiCallComplete(requestId, apiDuration, chunksCount);
+                        logSystem(`${requestId} 流式响应完成 - 总共发送 ${chunksCount} 个块`);
                         break;
                     }
                 }
@@ -388,7 +432,7 @@ function handleStreamResponse(
                 // 关闭流
                 controller.close();
             } catch (error) {
-                logError("流式处理期间出错:", error);
+                logError("流式处理期间出错", error, requestId);
                 
                 // 发送错误信息到流中
                 let errorMessage = "Stream processing failed";
@@ -434,16 +478,20 @@ function handleStreamResponse(
  * @param requestModelName - 请求的模型名称
  * @param input - 模型输入
  * @param apiService - API服务实例
+ * @param requestId - 请求ID
  * @returns 非流式响应
  */
 async function handleNonStreamResponse(
     chatCompletionId: string,
     requestModelName: string,
     input: ModelInput,
-    apiService: any
+    apiService: any,
+    requestId: string
 ): Promise<Response> {
-    logDebug("处理非流式响应（带600秒超时控制）");
+    logSystem(`${requestId} 处理非流式响应（带600秒超时控制）`);
 
+    const apiStartTime = Date.now();
+    
     try {
         // 使用超时控制包装API调用
         const assistantContent = await withTimeout(
@@ -451,6 +499,10 @@ async function handleNonStreamResponse(
             TIMEOUT_CONFIG.REQUEST_TIMEOUT,
             "API调用超时，请稍后重试"
         );
+
+        // 记录API调用完成（不记录响应内容）
+        const apiDuration = Date.now() - apiStartTime;
+        logApiCallComplete(requestId, apiDuration, assistantContent.length);
 
         // 构建最终响应（token使用量全部设置为0）
         const finalResponse: ChatCompletion = {
@@ -476,7 +528,7 @@ async function handleNonStreamResponse(
             },
         };
 
-        logDebug("非流式响应处理完成");
+        logSystem(`${requestId} 非流式响应处理完成`);
 
         return new Response(JSON.stringify(finalResponse), {
             status: 200,
@@ -488,16 +540,16 @@ async function handleNonStreamResponse(
     } catch (error) {
         // 检查是否是超时错误
         if (error instanceof Error && error.message.includes("超时")) {
-            logError("API调用超时:", error);
+            logError("API调用超时", error, requestId);
             return createTimeoutErrorResponse(error.message);
         }
         
         // 检查是否是Replicate API错误
         if (error && typeof error === 'object' && ('status' in error || 'response' in error)) {
-            return createReplicateErrorResponse(error as ReplicateError);
+            return createReplicateErrorResponse(error as ReplicateError, requestId);
         }
         
-        logError("调用API错误:", error);
+        logError("调用API错误", error, requestId);
         const errorMessage = error instanceof Error ? error.message : String(error);
         return createErrorResponse(
             `Failed to get response from API: ${errorMessage}`,

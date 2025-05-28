@@ -168,46 +168,189 @@ export function createTimeoutErrorResponse(message: string = "请求处理超时
   );
 }
 
+// ===== 安全日志系统 =====
+
 /**
- * 记录调试信息到控制台
- * @param label - 标签
- * @param data - 数据
+ * 请求日志接口
  */
-export function logDebug(label: string, data?: any): void {
+interface RequestLog {
+  timestamp: string;
+  method: string;
+  path: string;
+  userAgent?: string;
+  contentLength?: number;
+  model?: string;
+  stream?: boolean;
+  messagesCount?: number;
+}
+
+/**
+ * 响应日志接口
+ */
+interface ResponseLog {
+  timestamp: string;
+  requestId: string;
+  status: number;
+  duration: number;
+  contentLength?: number;
+  error?: string;
+}
+
+/**
+ * 生成请求唯一标识符
+ */
+export function generateRequestId(): string {
+  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+/**
+ * 记录请求开始（只记录非敏感信息）
+ * @param req - Request对象
+ * @param requestId - 请求ID
+ */
+export function logRequestStart(req: Request, requestId: string): void {
+  const url = new URL(req.url);
   const timestamp = new Date().toISOString();
-  if (data !== undefined) {
-    console.log(`[${timestamp}] [DEBUG] ${label}:`, typeof data === 'object' ? JSON.stringify(data) : data);
+  
+  const requestLog: RequestLog = {
+    timestamp,
+    method: req.method,
+    path: url.pathname,
+    userAgent: req.headers.get('user-agent')?.substring(0, 100), // 截断用户代理
+    contentLength: req.headers.get('content-length') ? parseInt(req.headers.get('content-length')!) : undefined
+  };
+  
+  console.log(`[${timestamp}] [REQ] ${requestId} ${req.method} ${url.pathname} - 开始处理`);
+}
+
+/**
+ * 记录请求参数（只记录安全的元数据）
+ * @param requestId - 请求ID
+ * @param requestBody - 请求体
+ */
+export function logRequestMetadata(requestId: string, requestBody: any): void {
+  const timestamp = new Date().toISOString();
+  
+  // 只记录非敏感的元数据
+  const safeMetadata = {
+    model: requestBody.model || "未指定",
+    stream: requestBody.stream || false,
+    max_tokens: requestBody.max_tokens || "未指定",
+    messages_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
+    // 不记录消息内容，只记录角色类型的统计
+    message_roles_count: Array.isArray(requestBody.messages) ? 
+      requestBody.messages.reduce((acc: any, msg: any) => {
+        acc[msg.role] = (acc[msg.role] || 0) + 1;
+        return acc;
+      }, {}) : {}
+  };
+  
+  console.log(`[${timestamp}] [META] ${requestId} 请求参数: ${JSON.stringify(safeMetadata)}`);
+}
+
+/**
+ * 记录API调用开始
+ * @param requestId - 请求ID
+ * @param model - 模型名称
+ * @param isStream - 是否流式
+ */
+export function logApiCallStart(requestId: string, model: string, isStream: boolean): void {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [API] ${requestId} 开始${isStream ? '流式' : ''}API调用 - 模型: ${model}`);
+}
+
+/**
+ * 记录API调用完成（不记录响应内容）
+ * @param requestId - 请求ID
+ * @param duration - 调用时长（毫秒）
+ * @param responseLength - 响应内容长度（字符数）
+ */
+export function logApiCallComplete(requestId: string, duration: number, responseLength?: number): void {
+  const timestamp = new Date().toISOString();
+  const lengthInfo = responseLength ? ` - 响应长度: ${responseLength}字符` : '';
+  console.log(`[${timestamp}] [API] ${requestId} API调用完成 - 耗时: ${duration}ms${lengthInfo}`);
+}
+
+/**
+ * 记录响应完成
+ * @param requestId - 请求ID
+ * @param startTime - 请求开始时间
+ * @param status - 响应状态码
+ * @param error - 错误信息（如果有）
+ */
+export function logResponseComplete(
+  requestId: string, 
+  startTime: number, 
+  status: number, 
+  error?: string
+): void {
+  const timestamp = new Date().toISOString();
+  const duration = Date.now() - startTime;
+  
+  const statusText = status >= 200 && status < 300 ? '成功' : 
+                    status >= 400 && status < 500 ? '客户端错误' : 
+                    '服务器错误';
+  
+  if (error) {
+    // 只记录错误类型，不记录可能包含用户内容的错误详情
+    const safeError = error.length > 100 ? error.substring(0, 100) + '...' : error;
+    console.log(`[${timestamp}] [RESP] ${requestId} ${status} ${statusText} - 耗时: ${duration}ms - 错误: ${safeError}`);
   } else {
-    console.log(`[${timestamp}] [DEBUG] ${label}`);
+    console.log(`[${timestamp}] [RESP] ${requestId} ${status} ${statusText} - 耗时: ${duration}ms`);
   }
 }
 
 /**
- * 记录错误信息到控制台
+ * 记录流式响应进度（不记录内容）
+ * @param requestId - 请求ID
+ * @param chunksCount - 已发送的块数量
+ */
+export function logStreamProgress(requestId: string, chunksCount: number): void {
+  // 只在特定间隔记录进度，避免日志过多
+  if (chunksCount % 10 === 0) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [STREAM] ${requestId} 流式响应进度 - 已发送 ${chunksCount} 个块`);
+  }
+}
+
+/**
+ * 记录系统信息（用于调试和监控）
+ * @param message - 系统消息
+ * @param data - 非敏感的数据
+ */
+export function logSystem(message: string, data?: any): void {
+  const timestamp = new Date().toISOString();
+  if (data !== undefined) {
+    console.log(`[${timestamp}] [SYS] ${message}: ${typeof data === 'object' ? JSON.stringify(data) : data}`);
+  } else {
+    console.log(`[${timestamp}] [SYS] ${message}`);
+  }
+}
+
+/**
+ * 记录错误信息到控制台（不包含用户内容）
+ * @param requestId - 请求ID（可选）
  * @param label - 标签
  * @param error - 错误
  */
-export function logError(label: string, error: unknown): void {
+export function logError(label: string, error: unknown, requestId?: string): void {
   const timestamp = new Date().toISOString();
-  console.error(`[${timestamp}] [ERROR] ${label}`, error instanceof Error ? error.message : String(error));
+  const prefix = requestId ? `${requestId} ` : '';
   
-  // 如果是Error对象，也记录堆栈信息
-  if (error instanceof Error && error.stack) {
-    console.error(`[${timestamp}] [ERROR] Stack trace:`, error.stack);
-  }
-}
-
-/**
- * 记录信息到控制台
- * @param label - 标签
- * @param data - 数据
- */
-export function logInfo(label: string, data?: any): void {
-  const timestamp = new Date().toISOString();
-  if (data !== undefined) {
-    console.log(`[${timestamp}] [INFO] ${label}:`, typeof data === 'object' ? JSON.stringify(data) : data);
+  if (error instanceof Error) {
+    // 只记录错误类型和安全的错误信息
+    const safeMessage = error.message.length > 200 ? 
+      error.message.substring(0, 200) + '...' : error.message;
+    console.error(`[${timestamp}] [ERROR] ${prefix}${label}: ${safeMessage}`);
+    
+    // 在开发环境下可以记录堆栈信息
+    if (Deno.env.get("DENO_ENV") !== "production" && error.stack) {
+      console.error(`[${timestamp}] [ERROR] ${prefix}Stack trace:`, error.stack);
+    }
   } else {
-    console.log(`[${timestamp}] [INFO] ${label}`);
+    const errorStr = String(error);
+    const safeErrorStr = errorStr.length > 200 ? errorStr.substring(0, 200) + '...' : errorStr;
+    console.error(`[${timestamp}] [ERROR] ${prefix}${label}: ${safeErrorStr}`);
   }
 }
 
@@ -219,11 +362,15 @@ export function logInfo(label: string, data?: any): void {
 export function logWarn(label: string, data?: any): void {
   const timestamp = new Date().toISOString();
   if (data !== undefined) {
-    console.warn(`[${timestamp}] [WARN] ${label}:`, typeof data === 'object' ? JSON.stringify(data) : data);
+    const safeData = typeof data === 'object' ? JSON.stringify(data) : String(data);
+    const truncatedData = safeData.length > 200 ? safeData.substring(0, 200) + '...' : safeData;
+    console.warn(`[${timestamp}] [WARN] ${label}: ${truncatedData}`);
   } else {
     console.warn(`[${timestamp}] [WARN] ${label}`);
   }
 }
+
+// ===== 保留的通用工具函数 =====
 
 /**
  * 安全的JSON解析
@@ -235,7 +382,7 @@ export function safeJsonParse<T>(jsonString: string, defaultValue: T): T {
   try {
     return JSON.parse(jsonString);
   } catch (error) {
-    logWarn("JSON解析失败", { jsonString, error: String(error) });
+    logWarn("JSON解析失败", "JSON格式错误");
     return defaultValue;
   }
 }

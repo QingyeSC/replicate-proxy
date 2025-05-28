@@ -1,6 +1,6 @@
 import { initReplicate, DEFAULT_MODEL_ID, getActualModelId } from "./config.ts";
 import { ModelInput, ReplicateEvent } from "./types.ts";
-import { logDebug, logError } from "./utils.ts";
+import { logError, logSystem } from "./utils.ts";
 
 /**
  * Replicate模型ID类型，格式为 `owner/model` 或 `owner/model:version`
@@ -39,16 +39,25 @@ export class ApiService {
     private apiKey: string;
 
     /**
+     * 请求ID（用于日志）
+     */
+    private requestId?: string;
+
+    /**
      * 构造函数
      * @param apiKey - 用户的Replicate API密钥
      * @param requestModelId - 请求中的模型ID
+     * @param requestId - 请求ID（用于日志）
      */
-    constructor(apiKey: string, requestModelId: string = DEFAULT_MODEL_ID) {
+    constructor(apiKey: string, requestModelId: string = DEFAULT_MODEL_ID, requestId?: string) {
         this.apiKey = apiKey;
         this.requestModelId = requestModelId;
         this.actualModelId = getActualModelId(requestModelId) as ReplicateModelId;
+        this.requestId = requestId;
         
-        logDebug(`模型映射: ${requestModelId} -> ${this.actualModelId}`);
+        if (requestId) {
+            logSystem(`${requestId} 模型映射: ${requestModelId} -> ${this.actualModelId}`);
+        }
     }
 
     /**
@@ -62,7 +71,7 @@ export class ApiService {
      * 处理Replicate API错误，保持原始错误格式
      */
     private handleReplicateError(error: any): never {
-        logError("Replicate API错误:", error);
+        logError("Replicate API错误", error, this.requestId);
         
         // 如果是Replicate API的错误响应，直接抛出
         if (error.response) {
@@ -84,26 +93,75 @@ export class ApiService {
     }
 
     /**
+     * 安全地记录输入参数的元数据（不记录实际内容）
+     * @param input - 模型输入
+     */
+    private logInputMetadata(input: ModelInput): void {
+        if (!this.requestId) return;
+        
+        const inputMetadata = {
+            prompt_length: input.prompt.length,
+            system_prompt_length: input.system_prompt?.length || 0,
+            max_tokens: input.max_tokens,
+            has_image: !!input.image,
+            max_image_resolution: input.max_image_resolution
+        };
+        
+        logSystem(`${this.requestId} API调用输入参数`, inputMetadata);
+    }
+
+    /**
+     * 安全地记录响应元数据（不记录实际内容）
+     * @param response - API响应
+     */
+    private logResponseMetadata(response: any): void {
+        if (!this.requestId) return;
+        
+        if (Array.isArray(response)) {
+            const totalLength = response.join("").length;
+            logSystem(`${this.requestId} API响应完成 - 数组格式，总长度: ${totalLength}字符，块数: ${response.length}`);
+        } else {
+            const responseStr = String(response);
+            logSystem(`${this.requestId} API响应完成 - 字符串格式，长度: ${responseStr.length}字符`);
+        }
+    }
+
+    /**
      * 流式调用模型API
      * @param input - 模型输入
      * @returns 异步迭代器，用于流式获取响应
      */
     async *streamModelResponse(input: ModelInput): AsyncIterable<ReplicateEvent> {
         try {
-            logDebug(`开始流式API调用，实际模型: ${this.actualModelId}`);
-            logDebug("输入:", input);
+            if (this.requestId) {
+                logSystem(`${this.requestId} 开始流式API调用，实际模型: ${this.actualModelId}`);
+            }
+            
+            // 安全地记录输入参数元数据
+            this.logInputMetadata(input);
 
             const replicateClient = this.getReplicateClient();
 
             // 基于官方示例修复流式API调用
             try {
-                logDebug("使用官方推荐的 stream 方法进行流式调用");
+                if (this.requestId) {
+                    logSystem(`${this.requestId} 使用官方推荐的 stream 方法进行流式调用`);
+                }
+                
+                let chunksReceived = 0;
+                let totalLength = 0;
                 
                 // 直接使用官方示例的调用方式
                 for await (const event of replicateClient.stream(this.actualModelId, { input })) {
                     // 根据官方示例，event 直接就是字符串内容
                     if (typeof event === 'string' && event.length > 0) {
-                        logDebug("收到流式数据块:", event.substring(0, 50) + (event.length > 50 ? '...' : ''));
+                        chunksReceived++;
+                        totalLength += event.length;
+                        
+                        // 安全地记录处理进度（不记录实际内容）
+                        if (this.requestId && chunksReceived % 20 === 0) {
+                            logSystem(`${this.requestId} 流式处理进度 - 已接收 ${chunksReceived} 个块，总长度: ${totalLength}字符`);
+                        }
                         
                         yield {
                             event: 'output',
@@ -113,11 +171,17 @@ export class ApiService {
                     // 处理可能的其他格式（兼容性考虑）
                     else if (event && typeof event === 'object') {
                         if ('data' in event && typeof event.data === 'string') {
+                            chunksReceived++;
+                            totalLength += event.data.length;
                             yield {
                                 event: 'output',
                                 data: event.data
                             };
                         } else if ('event' in event && 'data' in event) {
+                            if (typeof event.data === 'string') {
+                                chunksReceived++;
+                                totalLength += event.data.length;
+                            }
                             yield {
                                 event: event.event,
                                 data: event.data
@@ -128,6 +192,8 @@ export class ApiService {
                     else if (event !== null && event !== undefined) {
                         const eventStr = String(event);
                         if (eventStr.length > 0) {
+                            chunksReceived++;
+                            totalLength += eventStr.length;
                             yield {
                                 event: 'output',
                                 data: eventStr
@@ -142,15 +208,22 @@ export class ApiService {
                     data: undefined
                 };
                 
-                logDebug("流式API调用成功完成");
+                if (this.requestId) {
+                    logSystem(`${this.requestId} 流式API调用成功完成 - 总块数: ${chunksReceived}，总长度: ${totalLength}字符`);
+                }
 
             } catch (streamError) {
-                logError("流式方法失败，尝试回退方案:", streamError);
+                logError("流式方法失败，尝试回退方案", streamError, this.requestId);
                 
                 // 回退方案：使用 run 方法并模拟流式响应
-                logDebug("使用 run 方法作为回退方案");
+                if (this.requestId) {
+                    logSystem(`${this.requestId} 使用 run 方法作为回退方案`);
+                }
                 
                 const prediction = await replicateClient.run(this.actualModelId, { input });
+                
+                // 记录回退方案的响应元数据
+                this.logResponseMetadata(prediction);
                 
                 // 模拟流式响应
                 if (prediction) {
@@ -163,12 +236,14 @@ export class ApiService {
                     
                     // 将内容分成小块进行模拟流式输出
                     const chunkSize = 15; // 每个块的字符数
+                    let chunksCount = 0;
                     for (let i = 0; i < content.length; i += chunkSize) {
                         const chunk = content.slice(i, i + chunkSize);
                         yield {
                             event: 'output',
                             data: chunk
                         };
+                        chunksCount++;
                         
                         // 添加小延迟以模拟流式效果
                         await new Promise(resolve => setTimeout(resolve, 30));
@@ -180,12 +255,14 @@ export class ApiService {
                         data: undefined
                     };
                     
-                    logDebug("回退方案执行成功");
+                    if (this.requestId) {
+                        logSystem(`${this.requestId} 回退方案执行成功 - 模拟了 ${chunksCount} 个块`);
+                    }
                 }
             }
 
         } catch (error) {
-            logError("流式API调用失败:", error);
+            logError("流式API调用失败", error, this.requestId);
             this.handleReplicateError(error);
         }
     }
@@ -197,14 +274,20 @@ export class ApiService {
      */
     async getModelResponse(input: ModelInput): Promise<string> {
         try {
-            logDebug(`开始非流式API调用，实际模型: ${this.actualModelId}`);
-            logDebug("输入:", input);
+            if (this.requestId) {
+                logSystem(`${this.requestId} 开始非流式API调用，实际模型: ${this.actualModelId}`);
+            }
+            
+            // 安全地记录输入参数元数据
+            this.logInputMetadata(input);
 
             const replicateClient = this.getReplicateClient();
 
             // 调用Replicate非流式API
             const prediction = await replicateClient.run(this.actualModelId, { input });
-            logDebug("API响应:", prediction);
+            
+            // 安全地记录响应元数据（不记录实际内容）
+            this.logResponseMetadata(prediction);
 
             // 处理不同类型的返回值
             if (Array.isArray(prediction)) {
@@ -240,8 +323,9 @@ export class ApiService {
  * 创建API服务实例
  * @param apiKey - 用户的Replicate API密钥
  * @param requestModelId - 请求中的模型ID
+ * @param requestId - 请求ID（用于日志）
  * @returns ApiService实例
  */
-export function createApiService(apiKey: string, requestModelId?: string): ApiService {
-    return new ApiService(apiKey, requestModelId);
+export function createApiService(apiKey: string, requestModelId?: string, requestId?: string): ApiService {
+    return new ApiService(apiKey, requestModelId, requestId);
 }
