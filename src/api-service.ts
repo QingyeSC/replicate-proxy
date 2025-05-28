@@ -95,18 +95,97 @@ export class ApiService {
 
             const replicateClient = this.getReplicateClient();
 
-            // 调用Replicate流式API - 使用正确的参数格式
-            for await (const { event, data } of replicateClient.stream(this.actualModelId, {
-                input: input
-            })) {
+            // 基于官方示例修复流式API调用
+            try {
+                logDebug("使用官方推荐的 stream 方法进行流式调用");
+                
+                // 直接使用官方示例的调用方式
+                for await (const event of replicateClient.stream(this.actualModelId, { input })) {
+                    // 根据官方示例，event 直接就是字符串内容
+                    if (typeof event === 'string' && event.length > 0) {
+                        logDebug("收到流式数据块:", event.substring(0, 50) + (event.length > 50 ? '...' : ''));
+                        
+                        yield {
+                            event: 'output',
+                            data: event
+                        };
+                    }
+                    // 处理可能的其他格式（兼容性考虑）
+                    else if (event && typeof event === 'object') {
+                        if ('data' in event && typeof event.data === 'string') {
+                            yield {
+                                event: 'output',
+                                data: event.data
+                            };
+                        } else if ('event' in event && 'data' in event) {
+                            yield {
+                                event: event.event,
+                                data: event.data
+                            };
+                        }
+                    }
+                    // 处理其他可能的数据类型
+                    else if (event !== null && event !== undefined) {
+                        const eventStr = String(event);
+                        if (eventStr.length > 0) {
+                            yield {
+                                event: 'output',
+                                data: eventStr
+                            };
+                        }
+                    }
+                }
+                
+                // 发送完成事件
                 yield {
-                    event: event,
-                    data: data
+                    event: 'done',
+                    data: undefined
                 };
+                
+                logDebug("流式API调用成功完成");
+
+            } catch (streamError) {
+                logError("流式方法失败，尝试回退方案:", streamError);
+                
+                // 回退方案：使用 run 方法并模拟流式响应
+                logDebug("使用 run 方法作为回退方案");
+                
+                const prediction = await replicateClient.run(this.actualModelId, { input });
+                
+                // 模拟流式响应
+                if (prediction) {
+                    let content = "";
+                    if (Array.isArray(prediction)) {
+                        content = prediction.join("");
+                    } else {
+                        content = String(prediction);
+                    }
+                    
+                    // 将内容分成小块进行模拟流式输出
+                    const chunkSize = 15; // 每个块的字符数
+                    for (let i = 0; i < content.length; i += chunkSize) {
+                        const chunk = content.slice(i, i + chunkSize);
+                        yield {
+                            event: 'output',
+                            data: chunk
+                        };
+                        
+                        // 添加小延迟以模拟流式效果
+                        await new Promise(resolve => setTimeout(resolve, 30));
+                    }
+                    
+                    // 发送完成事件
+                    yield {
+                        event: 'done',
+                        data: undefined
+                    };
+                    
+                    logDebug("回退方案执行成功");
+                }
             }
 
-            logDebug("流式API调用成功完成");
         } catch (error) {
+            logError("流式API调用失败:", error);
             this.handleReplicateError(error);
         }
     }

@@ -29,6 +29,6 @@
     "test": "deno test --allow-net --allow-env"
   },
   "imports": {
-    "replicate": "npm:replicate@0.22.0"
+    "replicate": "npm:replicate@0.30.1"
   }
 }

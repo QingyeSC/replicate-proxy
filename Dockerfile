@@ -10,8 +10,8 @@ COPY deno.json ./
 # 复制源代码文件
 COPY src/ ./src/
 
-# 预缓存依赖项（使用root权限）
-RUN deno cache --reload src/main.ts
+# 清除旧的缓存并重新缓存依赖项（使用root权限）
+RUN deno cache --reload --lock-write src/main.ts
 
 # 创建deno用户可写的目录
 RUN mkdir -p /app/.deno && chown -R deno:deno /app
