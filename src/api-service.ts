@@ -127,6 +127,35 @@ export class ApiService {
     }
 
     /**
+     * 验证事件数据是否为有效的文本内容
+     * @param data - 事件数据
+     * @returns 是否为有效的文本内容
+     */
+    private isValidTextContent(data: any): boolean {
+        // 必须是字符串
+        if (typeof data !== 'string') {
+            return false;
+        }
+        
+        // 不能为空字符串
+        if (data.length === 0) {
+            return false;
+        }
+        
+        // 过滤掉明显无效的内容
+        const trimmedData = data.trim();
+        if (trimmedData === '' || 
+            trimmedData === '{}' || 
+            trimmedData === '[]' || 
+            trimmedData === 'null' || 
+            trimmedData === 'undefined') {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
      * 流式调用模型API
      * @param input - 模型输入
      * @returns 异步迭代器，用于流式获取响应
@@ -154,7 +183,7 @@ export class ApiService {
                 // 直接使用官方示例的调用方式
                 for await (const event of replicateClient.stream(this.actualModelId, { input })) {
                     // 根据官方示例，event 直接就是字符串内容
-                    if (typeof event === 'string' && event.length > 0) {
+                    if (this.isValidTextContent(event)) {
                         chunksReceived++;
                         totalLength += event.length;
                         
@@ -165,39 +194,55 @@ export class ApiService {
                         
                         yield {
                             event: 'output',
-                            data: event
+                            data: event as string
                         };
                     }
-                    // 处理可能的其他格式（兼容性考虑）
+                    // 处理可能的事件对象格式（严格验证）
                     else if (event && typeof event === 'object') {
-                        if ('data' in event && typeof event.data === 'string') {
+                        // 检查是否是标准的事件对象格式
+                        if ('event' in event && 'data' in event) {
+                            const eventData = event.data;
+                            const eventType = event.event;
+                            
+                            // 只处理有效的输出事件
+                            if (eventType === 'output' && this.isValidTextContent(eventData)) {
+                                chunksReceived++;
+                                totalLength += eventData.length;
+                                yield {
+                                    event: 'output',
+                                    data: eventData
+                                };
+                            }
+                            // 处理完成事件
+                            else if (eventType === 'done' || eventType === 'completed') {
+                                yield {
+                                    event: 'done',
+                                    data: undefined
+                                };
+                                break;
+                            }
+                        }
+                        // 检查是否只有data字段
+                        else if ('data' in event && this.isValidTextContent(event.data)) {
                             chunksReceived++;
                             totalLength += event.data.length;
                             yield {
                                 event: 'output',
                                 data: event.data
                             };
-                        } else if ('event' in event && 'data' in event) {
-                            if (typeof event.data === 'string') {
-                                chunksReceived++;
-                                totalLength += event.data.length;
+                        }
+                        // 其他对象格式，记录并跳过
+                        else {
+                            if (this.requestId) {
+                                logSystem(`${this.requestId} 跳过非文本事件对象: ${JSON.stringify(event).substring(0, 100)}`);
                             }
-                            yield {
-                                event: event.event,
-                                data: event.data
-                            };
                         }
                     }
-                    // 处理其他可能的数据类型
-                    else if (event !== null && event !== undefined) {
-                        const eventStr = String(event);
-                        if (eventStr.length > 0) {
-                            chunksReceived++;
-                            totalLength += eventStr.length;
-                            yield {
-                                event: 'output',
-                                data: eventStr
-                            };
+                    // 完全跳过无效数据，不转换为字符串
+                    else {
+                        if (this.requestId && event !== null && event !== undefined) {
+                            const eventPreview = String(event).substring(0, 50);
+                            logSystem(`${this.requestId} 跳过无效事件数据: ${eventPreview}`);
                         }
                     }
                 }
@@ -234,19 +279,28 @@ export class ApiService {
                         content = String(prediction);
                     }
                     
-                    // 将内容分成小块进行模拟流式输出
-                    const chunkSize = 15; // 每个块的字符数
-                    let chunksCount = 0;
-                    for (let i = 0; i < content.length; i += chunkSize) {
-                        const chunk = content.slice(i, i + chunkSize);
-                        yield {
-                            event: 'output',
-                            data: chunk
-                        };
-                        chunksCount++;
+                    // 验证内容是否有效
+                    if (this.isValidTextContent(content)) {
+                        // 将内容分成小块进行模拟流式输出
+                        const chunkSize = 15; // 每个块的字符数
+                        let chunksCount = 0;
+                        for (let i = 0; i < content.length; i += chunkSize) {
+                            const chunk = content.slice(i, i + chunkSize);
+                            if (this.isValidTextContent(chunk)) {
+                                yield {
+                                    event: 'output',
+                                    data: chunk
+                                };
+                                chunksCount++;
+                                
+                                // 添加小延迟以模拟流式效果
+                                await new Promise(resolve => setTimeout(resolve, 30));
+                            }
+                        }
                         
-                        // 添加小延迟以模拟流式效果
-                        await new Promise(resolve => setTimeout(resolve, 30));
+                        if (this.requestId) {
+                            logSystem(`${this.requestId} 回退方案执行成功 - 模拟了 ${chunksCount} 个块`);
+                        }
                     }
                     
                     // 发送完成事件
@@ -254,10 +308,6 @@ export class ApiService {
                         event: 'done',
                         data: undefined
                     };
-                    
-                    if (this.requestId) {
-                        logSystem(`${this.requestId} 回退方案执行成功 - 模拟了 ${chunksCount} 个块`);
-                    }
                 }
             }
 
