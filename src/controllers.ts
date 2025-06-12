@@ -407,7 +407,12 @@ function handleStreamResponse(
                         
                         await new Promise(resolve => setTimeout(resolve, 1)); // 微小延迟以提高并发性能
                     } else if (event.event === "done") {
-                        // 修复：直接发送 [DONE] 标记，不发送包含空 delta 的块
+                        // 根据OpenAI标准，在[DONE]之前发送一个带有finish_reason的结束块
+                        controller.enqueue(encoder.encode(
+                            createSSEChunk(chatCompletionId, requestModelName, null, null, "stop")
+                        ));
+                        
+                        // 然后发送 [DONE] 标记
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 
                         // 记录API调用完成
