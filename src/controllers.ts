@@ -407,15 +407,9 @@ function handleStreamResponse(
                         
                         await new Promise(resolve => setTimeout(resolve, 1)); // 微小延迟以提高并发性能
                     } else if (event.event === "done") {
-                        // 发送结束信号（token使用量全部设置为0）
-                        const usageInfo = {
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            total_tokens: 0
-                        };
-
+                        // 修复：发送结束信号时不包含usage信息
                         controller.enqueue(encoder.encode(
-                            createSSEChunk(chatCompletionId, requestModelName, null, null, "stop", usageInfo)
+                            createSSEChunk(chatCompletionId, requestModelName, null, null, "stop")
                         ));
 
                         // 发送 [DONE] 标记
