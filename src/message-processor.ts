@@ -31,8 +31,8 @@ export function processMessages(requestBody: RequestBody, requestId?: string): {
         // 提取图片URL
         extractImageUrls(messagesClone, imageUrls, requestId);
 
-        // 将消息数组转换为对话格式
-        userContent = formatMessagesToConversation(messagesClone, requestId);
+        // 将消息数组转换为 Anthropic 旧版 Completions API 格式
+        userContent = formatMessagesToAnthropicFormat(messagesClone, requestId);
 
         // 安全地记录处理结果的元数据（不记录实际内容）
         if (requestId) {
@@ -128,45 +128,76 @@ function extractImageUrls(messages: Message[], imageUrls: string[], requestId?: 
 }
 
 /**
- * 将消息数组格式化为对话格式
+ * 将消息数组格式化为 Anthropic 旧版 Completions API 格式
+ * 角色映射：user -> Human, assistant -> Assistant
+ * 格式：Human: xxx\nAssistant: xxx\n
+ * 智能处理最后的 Assistant 角色
  * @param messages - 消息数组
  * @param requestId - 请求ID（用于日志）
  * @returns 格式化后的对话内容
  */
-function formatMessagesToConversation(messages: Message[], requestId?: string): string {
+function formatMessagesToAnthropicFormat(messages: Message[], requestId?: string): string {
     let formattedContent = "";
     let messageCount = 0;
     let totalLength = 0;
 
+    // 角色映射
+    const roleMapping: Record<string, string> = {
+        "user": "Human",
+        "assistant": "Assistant"
+    };
+
+    // 处理每条消息
     for (const message of messages) {
         if (message.role && (message.content || Array.isArray(message.content))) {
+            // 获取映射后的角色名称，如果没有映射则保持原样
+            const mappedRole = roleMapping[message.role] || message.role;
+            
             // 添加角色前缀
-            formattedContent += `${message.role}: `;
+            formattedContent += `${mappedRole}: `;
 
             // 处理内容
+            let messageText = "";
             if (Array.isArray(message.content)) {
                 // 如果是数组，提取所有文本部分
-                const textParts = (message.content as ContentItem[])
+                messageText = (message.content as ContentItem[])
                     .filter(item => item.type === "text")
                     .map(item => item.text || "")
                     .join(" ");
-                formattedContent += textParts;
-                totalLength += textParts.length;
             } else {
                 // 如果是字符串，直接使用
-                formattedContent += message.content;
-                totalLength += message.content.length;
+                messageText = message.content;
             }
 
-            // 添加换行
+            formattedContent += messageText;
+            totalLength += messageText.length;
+
+            // 添加换行符
             formattedContent += "\n";
             messageCount++;
         }
     }
 
+    // 智能处理最后的 Assistant 角色
+    const lastMessage = messages[messages.length - 1];
+    
+    if (!lastMessage || lastMessage.role !== "assistant") {
+        // 如果最后一条消息不是 assistant 角色，添加 Assistant: 提示
+        formattedContent += "Assistant:";
+        
+        if (requestId) {
+            logSystem(`${requestId} 最后一条消息不是assistant角色，已添加Assistant:提示`);
+        }
+    } else {
+        // 如果最后一条消息是 assistant 角色，已经在上面的循环中处理为 Assistant: 了
+        if (requestId) {
+            logSystem(`${requestId} 最后一条消息是assistant角色，已保留并替换为Assistant:`);
+        }
+    }
+
     // 安全地记录格式化结果（不记录实际内容）
     if (requestId) {
-        logSystem(`${requestId} 格式化完成 - 消息数量: ${messageCount}, 总长度: ${totalLength}字符`);
+        logSystem(`${requestId} Anthropic格式化完成 - 消息数量: ${messageCount}, 总长度: ${totalLength}字符`);
     }
 
     return formattedContent;
@@ -174,7 +205,7 @@ function formatMessagesToConversation(messages: Message[], requestId?: string): 
 
 /**
  * 构建模型API输入
- * @param userContent - 用户内容
+ * @param userContent - 用户内容（已格式化为Anthropic格式）
  * @param systemPrompt - 系统提示
  * @param imageUrls - 图片URL数组
  * @param maxTokens - 最大token数量（可选）
@@ -222,7 +253,8 @@ export function buildModelInput(
             system_prompt_length: systemPrompt.length,
             max_tokens: validatedMaxTokens,
             has_image: !!input.image,
-            max_image_resolution: input.max_image_resolution
+            max_image_resolution: input.max_image_resolution,
+            format: "anthropic_completions_api"
         };
         logSystem(`${requestId} 构建模型输入完成`, inputMetadata);
         

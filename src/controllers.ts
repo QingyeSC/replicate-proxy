@@ -407,12 +407,7 @@ function handleStreamResponse(
                         
                         await new Promise(resolve => setTimeout(resolve, 1)); // 微小延迟以提高并发性能
                     } else if (event.event === "done") {
-                        // 修复：发送结束信号时不包含usage信息
-                        controller.enqueue(encoder.encode(
-                            createSSEChunk(chatCompletionId, requestModelName, null, null, "stop")
-                        ));
-
-                        // 发送 [DONE] 标记
+                        // 修复：直接发送 [DONE] 标记，不发送包含空 delta 的块
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 
                         // 记录API调用完成
